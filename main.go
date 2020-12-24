@@ -27,6 +27,7 @@ var (
 	respSize   = flag.Int("respsize", 0, "response size")
 	dry        = flag.Bool("dry", false, "dry run")
 	local      = flag.Bool("local", false, "local test")
+	output     = flag.String("output", "", "filename")
 )
 
 func main() {
@@ -104,7 +105,12 @@ func clientCall(client *http.Client) []int64 {
 }
 
 func print(printer chan []int64) {
-	filename := fmt.Sprintf("output-%s.csv", time.Now().Format("2006.01.02 15:04"))
+	var filename string
+	if *output != "" {
+		filename = *output
+	} else {
+		filename = fmt.Sprintf("output-%s.csv", time.Now().Format("2006.01.02 15:04"))
+	}
 	file, err := os.Create(filename)
 	if err != nil {
 		panic(err)
