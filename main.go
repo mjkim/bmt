@@ -1,47 +1,48 @@
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
+	"flag"
+	"fmt"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
-	"io/ioutil"
-	"encoding/csv"
+	"os"
 	"strconv"
 	"strings"
-	"bufio"
-	"flag"
 	"time"
-	"log"
-	"fmt"
-	"os"
+
 	"github.com/valyala/fasthttp"
 )
 
 var (
-	isClient = flag.Bool("client", false, "server or client")
-	addr = flag.String("addr", "http://127.0.0.1:80", "host:port (only for client mode)")
-	batchSize = flag.Int("size", 20, "batch size")
+	isClient   = flag.Bool("client", false, "server or client")
+	addr       = flag.String("addr", "http://127.0.0.1:80", "host:port (only for client mode)")
+	batchSize  = flag.Int("size", 20, "batch size")
 	batchCount = flag.Int("count", 10, "batch count")
-	reqSize = flag.Int("reqsize", 0, "request size")
-	verbose = flag.Bool("verbose", false, "verbose")
-	respSize = flag.Int("respsize", 0, "response size")
-	dry = flag.Bool("dry", false, "dry run")
-	local = flag.Bool("local", false, "local test")
+	reqSize    = flag.Int("reqsize", 0, "request size")
+	verbose    = flag.Bool("verbose", false, "verbose")
+	respSize   = flag.Int("respsize", 0, "response size")
+	dry        = flag.Bool("dry", false, "dry run")
+	local      = flag.Bool("local", false, "local test")
 )
 
 func main() {
 	flag.Parse()
 	fmt.Printf("client mode: %t\n", *isClient)
-	if (*isClient) {
+	if *isClient {
 		fmt.Printf("host: %s\n", *addr)
 		client()
 	} else {
 		done := make(chan bool)
 		go server()
-		if (*local) {
+		if *local {
 			time.Sleep(100 * time.Millisecond)
 			client()
 		}
-		<- done
+		<-done
 	}
 }
 
@@ -68,7 +69,7 @@ func client() {
 }
 
 func clientCall(client *http.Client) []int64 {
-	form := url.Values{"payload": {strings.Repeat("0", *reqSize)}}
+	form := url.Values{"payload": {strings.Repeat("0", *reqSize)}, "respSize": {strconv.Itoa(*respSize)}}
 
 	reqTimestamp := time.Now().UnixNano() / 1000
 	resp, err := client.PostForm(*addr, form)
@@ -81,13 +82,13 @@ func clientCall(client *http.Client) []int64 {
 	bodyString := string(body)
 	resp.Body.Close()
 
-	chunks := strings.SplitN(bodyString,"|", 3)
+	chunks := strings.SplitN(bodyString, "|", 3)
 
 	timestamp := chunks[0]
 	reqCount := chunks[1]
 
 	var first int64
-	if (reqCount == "1") {
+	if reqCount == "1" {
 		first = 1
 	} else {
 		first = 0
@@ -105,11 +106,11 @@ func clientCall(client *http.Client) []int64 {
 func print(printer chan []int64) {
 	filename := fmt.Sprintf("output-%s.csv", time.Now().Format("2006.01.02 15:04"))
 	file, err := os.Create(filename)
-    if err != nil {
-        panic(err)
+	if err != nil {
+		panic(err)
 	}
 	var writer *csv.Writer
-	if (*dry == false) {
+	if *dry == false {
 		writer = csv.NewWriter(bufio.NewWriter(file))
 		writer.Write([]string{"isFirst", "diff", "client to server", "server to client"})
 	}
@@ -124,12 +125,12 @@ func print(printer chan []int64) {
 		diff := strconv.FormatInt(datas[1], 10)
 		cts := strconv.FormatInt(datas[2], 10)
 		stc := strconv.FormatInt(datas[3], 10)
- 
-		if (*verbose) {
+
+		if *verbose {
 			fmt.Printf("%s %s %s %s\n", first, diff, cts, stc)
 		}
 
-		if (*dry == false) {
+		if *dry == false {
 			writer.Write([]string{first, diff, cts, stc})
 			writer.Flush()
 		}
@@ -141,7 +142,7 @@ func server() {
 	h := requestHandler
 
 	s := &fasthttp.Server{
-		Handler: h,
+		Handler:      h,
 		TCPKeepalive: true,
 	}
 
@@ -152,10 +153,12 @@ func server() {
 
 func requestHandler(ctx *fasthttp.RequestCtx) {
 	now := time.Now().UnixNano() / 1000
+	respSizeStr := string(ctx.FormValue("respSize"))
+	respSize, _ := strconv.Atoi(respSizeStr)
 
 	fmt.Fprintf(ctx, "%d|%d", now, ctx.ConnRequestNum())
-	if (*respSize != 0) {
+	if respSize != 0 {
 		fmt.Fprint(ctx, "|")
-		fmt.Fprintln(ctx, strings.Repeat("0", *respSize))
+		fmt.Fprintln(ctx, strings.Repeat("0", respSize))
 	}
 }
