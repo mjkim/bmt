@@ -32,6 +32,7 @@ var (
 	output       = flag.String("output", "", "filename")
 	report       = flag.Bool("report", false, "report to server")
 	reportPrefix = flag.String("reportPrefix", "", "report prefix for server")
+	onlyHit      = flag.Bool("onlyHit", false, "count only hit request(CF only)")
 )
 
 func main() {
@@ -69,8 +70,10 @@ func client() {
 
 	for i := 0; i < *batchCount; i++ {
 		for j := 0; j < *batchSize; j++ {
-			res := clientCall(c)
-			printer <- res
+			pass, res := clientCall(c)
+			if !pass {
+				printer <- res
+			}
 		}
 		tr.CloseIdleConnections()
 	}
@@ -78,14 +81,30 @@ func client() {
 	wg.Wait()
 }
 
-func clientCall(client *http.Client) []int64 {
-	form := url.Values{"payload": {strings.Repeat("0", *reqSize)}, "respSize": {strconv.Itoa(*respSize)}}
+func clientCall(client *http.Client) (bool, []int64) {
+	var err error
+	var resp *http.Response
+	var respTimestamp int64
+	var reqTimestamp int64
+	if *reqSize != 0 || *respSize != 0 {
+		form := url.Values{"payload": {strings.Repeat("0", *reqSize)}, "respSize": {strconv.Itoa(*respSize)}}
+		reqTimestamp = time.Now().UnixNano() / 1000
+		resp, err = client.PostForm(*addr, form)
+		respTimestamp = time.Now().UnixNano() / 1000
+	} else {
+		reqTimestamp = time.Now().UnixNano() / 1000
+		resp, err = client.Get(*addr)
+		respTimestamp = time.Now().UnixNano() / 1000
+	}
 
-	reqTimestamp := time.Now().UnixNano() / 1000
-	resp, err := client.PostForm(*addr, form)
-	respTimestamp := time.Now().UnixNano() / 1000
 	if err != nil {
 		panic(err)
+	}
+
+	if *onlyHit {
+		if strings.Contains(resp.Header.Get("X-Cache"), "Miss") {
+			return true, []int64{}
+		}
 	}
 
 	body, _ := ioutil.ReadAll(resp.Body)
@@ -110,7 +129,7 @@ func clientCall(client *http.Client) []int64 {
 	svrToRespDiff := respTimestamp - serverTimestamp
 	totalDiff := respTimestamp - reqTimestamp
 
-	return []int64{first, totalDiff, reqToSvrDiff, svrToRespDiff}
+	return false, []int64{first, totalDiff, reqToSvrDiff, svrToRespDiff}
 }
 
 func print(c *http.Client, printer chan []int64, done chan bool) {
