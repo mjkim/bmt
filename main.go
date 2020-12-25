@@ -12,22 +12,26 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/fasthttp/router"
 	"github.com/valyala/fasthttp"
 )
 
 var (
-	isClient   = flag.Bool("client", false, "server or client")
-	addr       = flag.String("addr", "http://127.0.0.1:80", "host:port (only for client mode)")
-	batchSize  = flag.Int("size", 20, "batch size")
-	batchCount = flag.Int("count", 10, "batch count")
-	reqSize    = flag.Int("reqsize", 0, "request size")
-	verbose    = flag.Bool("verbose", false, "verbose")
-	respSize   = flag.Int("respsize", 0, "response size")
-	dry        = flag.Bool("dry", false, "dry run")
-	local      = flag.Bool("local", false, "local test")
-	output     = flag.String("output", "", "filename")
+	isClient     = flag.Bool("client", false, "server or client")
+	addr         = flag.String("addr", "http://127.0.0.1:80", "host:port (only for client mode)")
+	batchSize    = flag.Int("size", 20, "batch size")
+	batchCount   = flag.Int("count", 10, "batch count")
+	reqSize      = flag.Int("reqsize", 0, "request size")
+	verbose      = flag.Bool("verbose", false, "verbose")
+	respSize     = flag.Int("respsize", 0, "response size")
+	dry          = flag.Bool("dry", false, "dry run")
+	local        = flag.Bool("local", false, "local test")
+	output       = flag.String("output", "", "filename")
+	report       = flag.Bool("report", false, "report to server")
+	reportPrefix = flag.String("reportPrefix", "", "report prefix for server")
 )
 
 func main() {
@@ -47,26 +51,31 @@ func main() {
 	}
 }
 
+var wg sync.WaitGroup
+
 func client() {
 	fmt.Printf("client mode, client: %s\n", *addr)
-
-	printer := make(chan []int64, 1024)
-	go print(printer)
 
 	tr := &http.Transport{
 		MaxIdleConns:       10,
 		IdleConnTimeout:    30 * time.Second,
 		DisableCompression: true,
 	}
-	client := &http.Client{Transport: tr}
+	c := &http.Client{Transport: tr}
+
+	printer := make(chan []int64, 1024)
+	done := make(chan bool)
+	go print(c, printer, done)
 
 	for i := 0; i < *batchCount; i++ {
 		for j := 0; j < *batchSize; j++ {
-			res := clientCall(client)
+			res := clientCall(c)
 			printer <- res
 		}
 		tr.CloseIdleConnections()
 	}
+	done <- true
+	wg.Wait()
 }
 
 func clientCall(client *http.Client) []int64 {
@@ -104,7 +113,8 @@ func clientCall(client *http.Client) []int64 {
 	return []int64{first, totalDiff, reqToSvrDiff, svrToRespDiff}
 }
 
-func print(printer chan []int64) {
+func print(c *http.Client, printer chan []int64, done chan bool) {
+	wg.Add(1)
 	var filename string
 	if *output != "" {
 		filename = *output
@@ -121,34 +131,55 @@ func print(printer chan []int64) {
 		writer.Write([]string{"isFirst", "diff", "client to server", "server to client"})
 	}
 
-	for datas := range printer {
-		var first string
-		if datas[0] == 1 {
-			first = "true"
-		} else {
-			first = "false"
-		}
-		diff := strconv.FormatInt(datas[1], 10)
-		cts := strconv.FormatInt(datas[2], 10)
-		stc := strconv.FormatInt(datas[3], 10)
+	for {
+		select {
+		case datas := <-printer:
+			var first string
+			if datas[0] == 1 {
+				first = "true"
+			} else {
+				first = "false"
+			}
+			diff := strconv.FormatInt(datas[1], 10)
+			cts := strconv.FormatInt(datas[2], 10)
+			stc := strconv.FormatInt(datas[3], 10)
 
-		if *verbose {
-			fmt.Printf("%s %s %s %s\n", first, diff, cts, stc)
-		}
+			if *verbose {
+				fmt.Printf("%s %s %s %s\n", first, diff, cts, stc)
+			}
 
-		if *dry == false {
-			writer.Write([]string{first, diff, cts, stc})
-			writer.Flush()
+			if *dry == false {
+				writer.Write([]string{first, diff, cts, stc})
+				writer.Flush()
+			}
+		case <-done:
+			file.Close()
+
+			data, _ := ioutil.ReadFile(filename)
+			csv := string(data)
+
+			if *report {
+				form := url.Values{"csv": {csv}, "filename": {filename}}
+				url := fmt.Sprintf("%s/report", *addr)
+				c.PostForm(url, form)
+			}
+
+			wg.Done()
+			return
 		}
 	}
 }
 
 func server() {
 	fmt.Println("server mode")
-	h := requestHandler
+	r := router.New()
+	r.POST("/", requestHandler)
+	r.GET("/", requestHandler)
+
+	r.POST("/report", reportHandler)
 
 	s := &fasthttp.Server{
-		Handler:      h,
+		Handler:      r.Handler,
 		TCPKeepalive: true,
 	}
 
@@ -156,6 +187,8 @@ func server() {
 		log.Fatalf("Error in ListenAndServe: %s", err)
 	}
 }
+
+var reporter chan string
 
 func requestHandler(ctx *fasthttp.RequestCtx) {
 	now := time.Now().UnixNano() / 1000
@@ -167,4 +200,17 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		fmt.Fprint(ctx, "|")
 		fmt.Fprintln(ctx, strings.Repeat("0", respSize))
 	}
+}
+
+func reportHandler(ctx *fasthttp.RequestCtx) {
+	csv := string(ctx.FormValue("csv"))
+	filename := string(ctx.FormValue("filename"))
+
+	filename = fmt.Sprintf("%s%s", *reportPrefix, filename)
+
+	file, _ := os.Create(filename)
+	file.WriteString(csv)
+	file.Close()
+
+	fmt.Fprintln(ctx, "OK")
 }
